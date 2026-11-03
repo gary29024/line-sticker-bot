@@ -77,7 +77,8 @@ class ImportResult:
     set_name: str
     link: str
     added: int = 0
-    failed: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)  # what went wrong, for the person to read
+    failed_indices: list[int] = field(default_factory=list)  # which stickers (0 = first in the LINE pack)
     title: str = ""
 
 
@@ -113,6 +114,7 @@ async def run_import(
                 sticker_file = await task
             except convert.ConvertError as exc:
                 result.failed.append(f"#{index}: {exc.text(lang)}")
+                result.failed_indices.append(index - 1)
                 continue
             sticker = InputSticker(
                 # attach=True: a file inside a sticker must be sent as an attachment, or Telegram
@@ -139,6 +141,7 @@ async def run_import(
                 if not created and "occupied" in str(exc).lower():
                     raise  # name taken: the caller picks another name
                 result.failed.append(f"#{index}: " + t(lang, "telegram_said", reason=exc.message))
+                result.failed_indices.append(index - 1)
                 if not created:
                     create_failures += 1
                     if create_failures >= 3:
@@ -151,6 +154,77 @@ async def run_import(
             task.cancel()
     if not created:
         raise UserError("none_converted", details="\n".join(result.failed[:5]))
+    return result
+
+
+# --------------------------------------------------------------------------
+# Retry the stickers that failed during an import
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class RetryRequest:
+    owner_id: int
+    set_name: str
+    sticker_type: str
+    link: line_store.LineLink
+    indices: list[int]  # which stickers of the LINE pack are missing (0 = first)
+    default_emoji: str
+    lang: str = "en"
+
+
+async def run_retry(bot: Bot, request: RetryRequest, progress: Progress) -> ImportResult:
+    """Add the missing stickers of a LINE pack to its Telegram set, each in its original place."""
+    lang = request.lang
+    await progress.update(t(lang, "downloading_line"), force=True)
+    pack = await line_store.download(request.link, lang=lang)
+    indices = sorted(set(request.indices))
+    if not indices or indices[-1] >= len(pack.items):
+        raise UserError("retry_pack_changed")
+    current = await telegram_sets.get_set(bot, request.set_name)
+    if current is None:
+        raise UserError("set_missing")
+    if len(current.stickers) + len(indices) > len(pack.items):
+        # The set already has (some of) them - e.g. the retry button was tapped twice.
+        raise UserError("retry_nothing_missing")
+
+    # Use the same emoji as the rest of the set.
+    first_emoji = current.stickers[0].emoji if current.stickers else None
+    emojis = [first_emoji] if first_emoji else [request.default_emoji]
+    emoji_mode = request.sticker_type == "custom_emoji"
+    result = ImportResult(
+        set_name=request.set_name, link=set_link(request.set_name, request.sticker_type), title=current.title
+    )
+
+    still_missing = 0  # failed again; stickers after it sit one place earlier
+    for done, index in enumerate(indices, start=1):
+        await progress.update(t(lang, "progress.retry", bar=bar(done - 1, len(indices))))
+        try:
+            converted = await convert.convert(pack.items[index].data, emoji=emoji_mode)
+        except convert.ConvertError as exc:
+            result.failed.append(f"#{index + 1}: {exc.text(lang)}")
+            result.failed_indices.append(index)
+            still_missing += 1
+            continue
+        sticker = InputSticker(
+            sticker=InputFile(converted.data, filename=converted.filename, attach=True),  # see run_import
+            emoji_list=emojis,
+            format=converted.format,
+        )
+        count_before = len(current.stickers)
+        try:
+            await telegram_sets.add_sticker(bot, request.owner_id, request.set_name, sticker, count_before)
+            # Telegram puts new stickers at the end - move it back where it belongs.
+            current = await telegram_sets.wait_for_count(bot, request.set_name, count_before + 1) or current
+            target = min(index - still_missing, len(current.stickers) - 1)
+            if len(current.stickers) > count_before and target < len(current.stickers) - 1:
+                await telegram_sets.move_sticker(bot, current.stickers[-1].file_id, target)
+            result.added += 1
+        except BadRequest as exc:
+            result.failed.append(f"#{index + 1}: " + t(lang, "telegram_said", reason=exc.message))
+            result.failed_indices.append(index)
+            still_missing += 1
+    await progress.update(t(lang, "progress.retry", bar=bar(len(indices), len(indices))), force=True)
     return result
 
 

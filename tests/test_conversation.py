@@ -12,7 +12,7 @@ import pytest
 from telegram import Update
 
 from stickerbot import bot as botmod
-from stickerbot import line_store
+from stickerbot import convert, line_store, telegram_sets
 from stickerbot.config import Config
 from stickerbot.storage import SqliteStorage as Storage
 from conftest import make_apng, make_png
@@ -45,6 +45,7 @@ async def setup(tmp_path, monkeypatch):
 
     monkeypatch.setattr(line_store, "fetch_info", fake_info)
     monkeypatch.setattr(line_store, "download", fake_download)
+    monkeypatch.setattr(telegram_sets, "SETTLE_WAITS", (0.05, 0.05, 0.05, 0.05, 0.05))  # don't wait seconds in tests
 
     tg = FakeTelegram()
     config = Config(
@@ -223,3 +224,63 @@ async def test_private_bot_blocks_strangers(setup, tmp_path):
     object.__setattr__(app.bot_data["config"], "allowed_user_ids", frozenset({1}))
     await send(app, UpdateMaker(user_id=42).text("/start"))
     assert "private bot" in tg.texts()[-1]
+
+
+async def test_new_set_not_ready_yet_is_waited_for(setup):
+    """Telegram can say "Stickerset_invalid" for a moment right after creating a set."""
+    app, tg = setup
+    tg.not_ready_after_create = 3
+    await import_pack(app, tg, UpdateMaker(user_id=42))
+    assert len(tg.sets["ls11537_by_test_sticker_bot"]["stickers"]) == 3
+    assert not any("couldn't be added" in t for t in tg.texts())
+
+
+async def test_retry_button_puts_failed_stickers_back_in_place(setup, monkeypatch):
+    app, tg = setup
+    user = UpdateMaker(user_id=42)
+    name = "ls11537_by_test_sticker_bot"
+
+    # The 2nd sticker (the still one) fails to convert the first time only.
+    real_convert = convert.convert
+    failed_once = []
+
+    async def flaky_convert(data, emoji=False):
+        if not line_store.is_animated_png(data) and not failed_once:
+            failed_once.append(True)
+            raise convert.ConvertError("conv.tool_stopped", code=-15)
+        return await real_convert(data, emoji)
+
+    monkeypatch.setattr(convert, "convert", flaky_convert)
+    await send(app, user.text(LINK))
+    await send(app, user.button("line:make"))
+    await send(app, user.button("imp:title"))
+    await send(app, user.button("imp:emoji"))
+    await wait_for(lambda: any("Done!" in t for t in tg.texts()), tg=tg)
+
+    done = next(t for t in tg.texts() if "Done!" in t)
+    assert "2 stickers added" in done and "1 couldn't be added" in done and "#2:" in done
+    assert [s["_format"] for s in tg.sets[name]["stickers"]] == ["video", "video"]
+    retry = next(b for row in tg.last_markup() for b in row if b.get("callback_data", "").startswith("rt:"))
+    assert retry["text"] == "🔁 Retry the 1 that failed"
+
+    # The bot "restarts" (e.g. Cloudflare put it to sleep): the button still works.
+    fresh = botmod.build_app(app.bot_data["config"], app.bot_data["storage"], request=tg)
+    await fresh.initialize()
+    await botmod.post_init(fresh)
+    await fresh.start()
+    try:
+        await send(fresh, user.button(retry["callback_data"]))
+        await wait_for(lambda: any("Added 1 of the 1 that failed" in t for t in tg.texts()), tg=tg)
+    finally:
+        await fresh.stop()
+        await fresh.shutdown()
+
+    stickers = tg.sets[name]["stickers"]
+    assert [s["_format"] for s in stickers] == ["video", "static", "video"]  # back in 2nd place
+    assert stickers[1]["emoji"] == stickers[0]["emoji"] == "⭐"  # same emoji as the rest of the set
+    assert tg.called("setStickerPositionInSet")[-1]["position"] == 1
+
+    # Tapping the same button again doesn't add duplicates
+    await send(app, user.button(retry["callback_data"]))
+    await wait_for(lambda: "already back in the set" in tg.texts()[-1])
+    assert len(tg.sets[name]["stickers"]) == 3

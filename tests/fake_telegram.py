@@ -26,6 +26,10 @@ class FakeTelegram(BaseRequest):
         self.files: dict[str, bytes] = {}
         self.ids = itertools.count(1000)
         self.flood_once: set[str] = set()  # methods that answer "429 retry later" once
+        # Like real Telegram: right after a set is created, adding to it can briefly fail with
+        # STICKERSET_INVALID. Set this to how many adds should fail that way.
+        self.not_ready_after_create = 0
+        self._not_ready_left = 0
         self.sent_documents: list[tuple[str, bytes]] = []
 
     # --- BaseRequest plumbing -------------------------------------------------
@@ -183,9 +187,13 @@ class FakeTelegram(BaseRequest):
         }
         for item, data in checked:
             self.sets[name.lower()]["stickers"].append(self._store_sticker(name.lower(), item, data))
+        self._not_ready_left = self.not_ready_after_create
         return self._ok(True)
 
     def m_addStickerToSet(self, params, files):
+        if self._not_ready_left > 0:
+            self._not_ready_left -= 1
+            return self._bad("STICKERSET_INVALID")
         s = self.sets.get(params["name"].lower())
         if not s:
             return self._bad("STICKERSET_INVALID")

@@ -210,6 +210,26 @@ TEXTS: dict[str, dict[str, str]] = {
     },
     "btn.add_to_telegram": {"en": "➕ Add to Telegram", "zh": "➕ 加入 Telegram"},
     "btn.manage_this_set": {"en": "🛠 Manage this set", "zh": "🛠 管理這個貼圖包"},
+    "btn.retry_failed": {"en": "🔁 Retry the {count} that failed", "zh": "🔁 重試失敗的 {count} 個"},
+    "retrying": {"en": "🔁 Retrying {count}…", "zh": "🔁 正在重試 {count} 個…"},
+    "progress.retry": {"en": "🔁 Retrying {bar}", "zh": "🔁 重試中 {bar}"},
+    "retry_done": {
+        "en": "✅ Added {added} of the {count} that failed, each in its original place.\n{link}",
+        "zh": "✅ 之前失敗的 {count} 個中，已加入 {added} 個，並放回原本的位置。\n{link}",
+    },
+    "retry_pack_changed": {
+        "en": "The LINE pack has changed since the import, so I can't tell which stickers are missing. "
+        "Delete the set and import it again.",
+        "zh": "這個 LINE 貼圖包在匯入後有所改變，我無法判斷缺少哪些貼圖。請刪除貼圖包後重新匯入。",
+    },
+    "retry_nothing_missing": {
+        "en": "Those stickers are already back in the set – nothing to retry.",
+        "zh": "那些貼圖已經在貼圖包內，不需要重試。",
+    },
+    "retry_unavailable": {
+        "en": "I don't know which LINE pack this set came from, so I can't retry it.",
+        "zh": "我不知道這個貼圖包來自哪個 LINE 貼圖，所以無法重試。",
+    },
     "progress.import": {"en": "⚙️ Converting {converted}\n📤 Uploading {uploaded}", "zh": "⚙️ 轉換中 {converted}\n📤 上載中 {uploaded}"},
     "telegram_said": {"en": "Telegram said “{reason}”", "zh": "Telegram 回覆「{reason}」"},
     "none_converted": {

@@ -239,6 +239,7 @@ Where to set them:
 | `/myid` | tells you your Telegram user ID |
 
 Making a set takes about three questions: the set's name (or keep LINE's), which emoji to tag the stickers with, and that's it.
+If a few stickers fail, the "Done!" message has a **🔁 Retry the ones that failed** button that adds them back in their original places.
 A 40-sticker animated pack takes roughly 1–2 minutes on a small server.
 
 Links the bot understands:

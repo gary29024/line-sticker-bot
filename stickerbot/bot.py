@@ -154,6 +154,15 @@ async def download_telegram_file(context: ContextTypes.DEFAULT_TYPE, file_id: st
     return bytes(await file.download_as_bytearray())
 
 
+def retry_button(lang: str, set_id: int, indices: list[int]) -> list[Btn]:
+    """A "Retry the ones that failed" button. The list of failed stickers is packed into the
+    button itself (one bit per sticker), so it keeps working even after the bot has slept."""
+    mask = 0
+    for index in indices:
+        mask |= 1 << index
+    return [Btn(i18n.t(lang, "btn.retry_failed", count=len(indices)), callback_data=f"rt:{set_id}:{mask:x}")]
+
+
 def noun(context: ContextTypes.DEFAULT_TYPE, sticker_type: str) -> str:
     return T(context, "noun.emoji" if sticker_type == "custom_emoji" else "noun.stickers")
 
@@ -486,11 +495,54 @@ async def launch_import(update: Update, context: ContextTypes.DEFAULT_TYPE, emoj
             text += i18n.t(lang, "import_some_failed", count=len(result.failed), details=details)
         await progress.update(i18n.t(lang, "finished"), force=True)
         rows = [[Btn(i18n.t(lang, "btn.add_to_telegram"), url=result.link)]]
+        if record and result.failed_indices:
+            rows.append(retry_button(lang, record.id, result.failed_indices))
         if record:
             rows.append([Btn(i18n.t(lang, "btn.manage_this_set"), callback_data=f"open:{record.id}")])
         await safe_send(context, chat_id, text, kb(*rows))
 
     background(context, chat_id, work, T(context, "downloading_line"))
+
+
+async def start_retry(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
+    """The "🔁 Retry the ones that failed" button: add the missing stickers, each in its place."""
+    try:
+        _, set_id, mask_hex = data.split(":")
+        mask = int(mask_hex, 16)
+    except ValueError:
+        return
+    record = await owned_set(context, update.effective_user.id, set_id=set_id)
+    if record is None:
+        await say(update, context, T(context, "not_yours"))
+        return
+    link = line_store.parse_line_link(record.source or "")
+    if link is None:
+        await say(update, context, T(context, "retry_unavailable"))
+        return
+    indices = [i for i in range(mask.bit_length()) if mask >> i & 1]
+    if not indices or not await ensure_not_busy(update, context):
+        return
+    reset(context)
+    chat_id, lang, bot = update.effective_chat.id, L(context), context.bot
+    request = jobs.RetryRequest(
+        owner_id=record.owner_id, set_name=record.name, sticker_type=record.sticker_type, link=link,
+        indices=indices, default_emoji=cfg(context).default_emoji, lang=lang,
+    )
+
+    async def work(progress: jobs.Progress) -> None:
+        result = await jobs.run_retry(bot, request, progress)
+        text = i18n.t(lang, "retry_done", added=result.added, count=len(indices), link=result.link)
+        if result.failed:
+            details = "\n".join(esc(f) for f in result.failed[:8])
+            text += i18n.t(lang, "import_some_failed", count=len(result.failed), details=details)
+        await progress.update(i18n.t(lang, "finished"), force=True)
+        rows = [[Btn(i18n.t(lang, "btn.add_to_telegram"), url=result.link)]]
+        if result.failed_indices:
+            rows.append(retry_button(lang, record.id, result.failed_indices))
+        rows.append([Btn(i18n.t(lang, "btn.manage_this_set"), callback_data=f"open:{record.id}")])
+        await safe_send(context, chat_id, text, kb(*rows))
+
+    background(context, chat_id, work, T(context, "retrying", count=len(indices)))
 
 
 async def start_line_zip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -832,6 +884,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await start_import(update, context, copy=True)
     elif data == "imp:cancel":
         await cmd_cancel(update, context)
+    elif data.startswith("rt:"):
+        await start_retry(update, context, data)
 
     # Download a Telegram set
     elif data == "tg:zip":

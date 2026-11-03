@@ -114,25 +114,72 @@ async def create_set(
     )
 
 
+# Telegram sometimes needs a moment after creating a set before stickers can be added to it
+# (or after adding a sticker before it can be moved). Meanwhile it answers "STICKERSET_INVALID"
+# / "STICKER_INVALID". These are the pauses (seconds) between tries.
+SETTLE_WAITS = (1, 2, 3, 5, 8)
+
+
+def _not_ready(exc: BadRequest, *codes: str) -> bool:
+    text = str(exc).lower()
+    return any(code in text for code in codes)
+
+
 async def add_sticker(bot: Bot, user_id: int, name: str, sticker: InputSticker, count_before: int | None = None) -> None:
-    """Add one sticker. If the upload times out we check whether it actually arrived
-    before trying again, so the same sticker isn't added twice."""
-    for attempt in range(8):
+    """Add one sticker.
+
+    * If Telegram says the set doesn't exist yet (it was only just created), wait and try again.
+    * If the upload times out, check whether it actually arrived before trying again,
+      so the same sticker isn't added twice.
+    """
+    network_failures = 0
+    not_ready = 0
+    while True:
         try:
             await bot.add_sticker_to_set(user_id=user_id, name=name, sticker=sticker)
             return
         except RetryAfter as exc:
             await asyncio.sleep(_seconds(exc.retry_after) + 1)
-        except BadRequest:
+        except BadRequest as exc:
+            if _not_ready(exc, "stickerset_invalid") and not_ready < len(SETTLE_WAITS):
+                log.info("Set %s not ready yet, waiting %ss", name, SETTLE_WAITS[not_ready])
+                await asyncio.sleep(SETTLE_WAITS[not_ready])
+                not_ready += 1
+                continue
             raise
         except (TimedOut, NetworkError):
             if count_before is not None:
                 current = await get_set(bot, name)
                 if current is not None and len(current.stickers) > count_before:
                     return  # it went through after all
-            if attempt == 7:
+            network_failures += 1
+            if network_failures >= 8:
                 raise
-            await asyncio.sleep(min(30, 2**attempt))
+            await asyncio.sleep(min(30, 2**network_failures))
+
+
+async def wait_for_count(bot: Bot, name: str, at_least: int) -> StickerSet | None:
+    """The set, once Telegram shows at least `at_least` stickers in it (a just-added one can
+    take a moment to appear)."""
+    current = await get_set(bot, name)
+    for wait in SETTLE_WAITS:
+        if current is not None and len(current.stickers) >= at_least:
+            break
+        await asyncio.sleep(wait)
+        current = await get_set(bot, name)
+    return current
+
+
+async def move_sticker(bot: Bot, file_id: str, position: int) -> None:
+    """Move a sticker to `position` (0 = first), waiting if Telegram doesn't know it yet."""
+    for wait in (*SETTLE_WAITS, None):
+        try:
+            await call(bot.set_sticker_position_in_set, file_id, position)
+            return
+        except BadRequest as exc:
+            if wait is None or not _not_ready(exc, "sticker_invalid", "stickerset_invalid"):
+                raise
+            await asyncio.sleep(wait)
 
 
 # --------------------------------------------------------------------------
