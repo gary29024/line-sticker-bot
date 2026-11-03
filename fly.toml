@@ -1,0 +1,21 @@
+# Fly.io settings. Change "app" to a unique name before running `fly launch`.
+app = "line-sticker-bot-change-me"
+primary_region = "nrt"  # Tokyo - close to LINE's servers. Use "sin" for Singapore, etc.
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  DATA_DIR = "/data"
+
+# Keeps the bot's database when the bot restarts or is updated.
+[mounts]
+  source = "stickerbot_data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+# No [http_service] section: the bot doesn't need a web address, and without one
+# Fly keeps it running all the time instead of putting it to sleep.
