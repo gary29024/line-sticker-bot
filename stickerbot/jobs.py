@@ -19,6 +19,7 @@ from telegram import Bot, InputFile, InputSticker, Message
 from telegram.error import BadRequest, TelegramError
 
 from . import convert, line_store, telegram_sets
+from .i18n import UserError, t
 from .storage import RemoteStorage, SqliteStorage, set_link
 
 log = logging.getLogger(__name__)
@@ -64,6 +65,7 @@ class ImportRequest:
     title: str
     set_name: str
     emojis: list[str]
+    lang: str = "en"  # the person's language, for progress messages
 
     @property
     def sticker_type(self) -> str:
@@ -82,8 +84,9 @@ class ImportResult:
 async def run_import(
     bot: Bot, storage: SqliteStorage | RemoteStorage, request: ImportRequest, progress: Progress, convert_workers: int = 2
 ) -> ImportResult:
-    await progress.update("⬇️ Downloading from LINE…", force=True)
-    pack = await line_store.download(request.link)
+    lang = request.lang
+    await progress.update(t(lang, "downloading_line"), force=True)
+    pack = await line_store.download(request.link, lang=lang)
     emoji_mode = pack.kind == "emoji"
     total = len(pack.items)
     result = ImportResult(set_name=request.set_name, link=set_link(request.set_name, request.sticker_type), title=request.title)
@@ -109,7 +112,7 @@ async def run_import(
             try:
                 sticker_file = await task
             except convert.ConvertError as exc:
-                result.failed.append(f"#{index}: {exc}")
+                result.failed.append(f"#{index}: {exc.text(lang)}")
                 continue
             sticker = InputSticker(
                 # attach=True: a file inside a sticker must be sent as an attachment, or Telegram
@@ -135,19 +138,19 @@ async def run_import(
             except BadRequest as exc:
                 if not created and "occupied" in str(exc).lower():
                     raise  # name taken: the caller picks another name
-                result.failed.append(f"#{index}: Telegram said “{exc.message}”")
+                result.failed.append(f"#{index}: " + t(lang, "telegram_said", reason=exc.message))
                 if not created:
                     create_failures += 1
                     if create_failures >= 3:
                         raise  # creating the set keeps failing - something bigger is wrong
             await progress.update(
-                f"⚙️ Converting {bar(converted_count, total)}\n📤 Uploading {bar(result.added, total)}"
+                t(lang, "progress.import", converted=bar(converted_count, total), uploaded=bar(result.added, total))
             )
     finally:
         for task in tasks:
             task.cancel()
     if not created:
-        raise RuntimeError("None of the stickers could be converted:\n" + "\n".join(result.failed[:5]))
+        raise UserError("none_converted", details="\n".join(result.failed[:5]))
     return result
 
 
@@ -156,10 +159,10 @@ async def run_import(
 # --------------------------------------------------------------------------
 
 
-async def run_line_zip(link: line_store.LineLink, progress: Progress) -> tuple[str, bytes, str]:
+async def run_line_zip(link: line_store.LineLink, progress: Progress, lang: str = "en") -> tuple[str, bytes, str]:
     """Download a LINE pack's original files (PNG / animated PNG, plus sounds) into a ZIP."""
-    await progress.update("⬇️ Downloading from LINE…", force=True)
-    pack = await line_store.download(link)
+    await progress.update(t(lang, "downloading_line"), force=True)
+    pack = await line_store.download(link, lang=lang)
     folder = f"line_{pack.kind}_{link.pack_id}"
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -167,22 +170,23 @@ async def run_line_zip(link: line_store.LineLink, progress: Progress) -> tuple[s
             zf.writestr(f"{folder}/{n:02d}_{item.key}.png", item.data)
             if item.sound:
                 zf.writestr(f"{folder}/{n:02d}_{item.key}.m4a", item.sound)
-        zf.writestr(f"{folder}/info.txt", f"{pack.title}\n{link.store_url}\n{pack.describe()}\n")
-    note = "Animated ones are animated PNG files - they play in web browsers." if pack.animated else ""
-    return f"{folder}.zip", buf.getvalue(), f"📦 <b>{_esc(pack.title)}</b> — {pack.describe()}. {note}"
+        zf.writestr(f"{folder}/info.txt", f"{pack.title}\n{link.store_url}\n{pack.describe(lang)}\n")
+    note = t(lang, "line_zip_animated_note") if pack.animated else ""
+    caption = t(lang, "line_zip_caption", title=_esc(pack.title), describe=_esc(pack.describe(lang)), note=note)
+    return f"{folder}.zip", buf.getvalue(), caption.strip()
 
 
-async def run_telegram_zip(bot: Bot, set_name: str, progress: Progress) -> tuple[str, bytes, str]:
-    await progress.update("⬇️ Fetching sticker set…", force=True)
+async def run_telegram_zip(bot: Bot, set_name: str, progress: Progress, lang: str = "en") -> tuple[str, bytes, str]:
+    await progress.update(t(lang, "fetching_set"), force=True)
     sticker_set = await telegram_sets.get_set(bot, set_name)
     if sticker_set is None:
-        raise RuntimeError("I can't find that Telegram sticker set.")
+        raise UserError("set_not_found")
 
     async def step(done: int, total: int) -> None:
-        await progress.update(f"⬇️ Downloading {bar(done, total)}")
+        await progress.update(t(lang, "progress.download", bar=bar(done, total)))
 
     data = await telegram_sets.zip_set(bot, sticker_set, step)
-    caption = f"📦 <b>{_esc(sticker_set.title)}</b> — {len(sticker_set.stickers)} stickers"
+    caption = t(lang, "tg_zip_caption", title=_esc(sticker_set.title), count=len(sticker_set.stickers))
     return f"{sticker_set.name}.zip", data, caption
 
 

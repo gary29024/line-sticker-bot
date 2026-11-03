@@ -74,6 +74,12 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS sets (
     created_at REAL NOT NULL
 )"""
 
+# Each person's chosen language (only stored if they picked one with /language).
+PREFS_SCHEMA = """CREATE TABLE IF NOT EXISTS user_prefs (
+    user_id INTEGER PRIMARY KEY,
+    lang TEXT NOT NULL
+)"""
+
 
 class SqliteStorage:
     """The list kept in a file on this computer."""
@@ -85,6 +91,7 @@ class SqliteStorage:
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.execute(SCHEMA)
+        self.db.execute(PREFS_SCHEMA)
         self.db.execute("CREATE INDEX IF NOT EXISTS sets_owner ON sets(owner_id)")
         self.db.commit()
 
@@ -117,6 +124,22 @@ class SqliteStorage:
 
     async def delete(self, name: str) -> None:
         self.db.execute("DELETE FROM sets WHERE lower(name) = lower(?)", (name,))
+        self.db.commit()
+
+    async def get_lang(self, user_id: int) -> str | None:
+        row = self.db.execute("SELECT lang FROM user_prefs WHERE user_id = ?", (user_id,)).fetchone()
+        return row["lang"] if row else None
+
+    async def set_lang(self, user_id: int, lang: str | None) -> None:
+        """Remember a person's language; None = forget it (follow their Telegram app)."""
+        if lang is None:
+            self.db.execute("DELETE FROM user_prefs WHERE user_id = ?", (user_id,))
+        else:
+            self.db.execute(
+                "INSERT INTO user_prefs (user_id, lang) VALUES (?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET lang = excluded.lang",
+                (user_id, lang),
+            )
         self.db.commit()
 
     async def close(self) -> None:
@@ -179,6 +202,12 @@ class RemoteStorage:
 
     async def delete(self, name: str) -> None:
         await self._call("delete", name=name)
+
+    async def get_lang(self, user_id: int) -> str | None:
+        return await self._call("get_lang", user_id=user_id)
+
+    async def set_lang(self, user_id: int, lang: str | None) -> None:
+        await self._call("set_lang", user_id=user_id, lang=lang)
 
     async def close(self) -> None:
         await self.client.aclose()

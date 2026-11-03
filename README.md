@@ -19,6 +19,8 @@ Other features:
 - **Download as ZIP** – get the original files of any LINE pack, or every sticker in any Telegram set.
 - **No duplicate work** – if someone already converted a pack, the bot gives you the existing set straight away, and offers to make you your own editable copy.
 - **Private mode** – optionally limit the bot to you and your friends.
+- **English and Traditional Chinese (Hong Kong)** – each person sees the bot in their Telegram app's language,
+  or picks one with `/language`. 機械人支援繁體中文（香港）。
 - **Runs on Cloudflare** (Worker + Container, sleeps when idle), or on Railway, Fly.io or any computer with Docker.
 
 > Inspired by [moe-sticker-bot](https://github.com/star-39/moe-sticker-bot). This is an independent, smaller rewrite in Python, made to be easy to read and host.
@@ -233,6 +235,7 @@ Where to set them:
 | any other sticker, or a `t.me/addstickers/...` link | offers to download the whole set as a ZIP |
 | `/download` | asks what to download, then sends the ZIP |
 | `/cancel` | stops whatever you were doing |
+| `/language` | switch between English and 繁體中文, or follow your Telegram app's language |
 | `/myid` | tells you your Telegram user ID |
 
 Making a set takes about three questions: the set's name (or keep LINE's), which emoji to tag the stickers with, and that's it.
@@ -270,7 +273,8 @@ Links the bot understands:
 | `stickerbot/telegram_sets.py` | Telegram set names, polite retrying ("flood control"), adding stickers without accidental duplicates, ZIP of a Telegram set. |
 | `stickerbot/jobs.py` | The slow work (import, ZIP downloads) with a live progress message. |
 | `stickerbot/storage.py` | Which set belongs to whom: a small database file, or Cloudflare D1. |
-| `stickerbot/bot.py` | Everything the bot says and every button. |
+| `stickerbot/bot.py` | The conversation: what happens for each message and button. |
+| `stickerbot/i18n.py` | Every message the bot can send, in English and Traditional Chinese. **Edit this file to change any wording.** |
 | `stickerbot/webhook.py` | Cloudflare only: the small web server that receives messages from the Worker. |
 | `worker/index.ts` | Cloudflare only: the Worker "front desk" – checks Telegram's password, wakes the container, the `/setup` page. |
 | `worker/store.ts` | Cloudflare only: reads and writes the list of sets in the D1 database. |

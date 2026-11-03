@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from .i18n import UserError, t
+
 CDN = "https://stickershop.line-scdn.net"
 STORE = "https://store.line.me"
 
@@ -36,8 +38,8 @@ MAX_DOWNLOAD_BYTES = 80 * 1024 * 1024
 DEFAULT_LANGS = ("en", "zh-Hant", "ja", "zh-Hans", "ko", "th", "id")
 
 
-class LineError(Exception):
-    """Something went wrong talking to LINE. The message is safe to show users."""
+class LineError(UserError):
+    """Something went wrong talking to LINE. Shown to the person in their language (see i18n.py)."""
 
 
 # --------------------------------------------------------------------------
@@ -53,7 +55,9 @@ class LineLink:
 
     @property
     def store_url(self) -> str:
-        lang = self.lang or "en"
+        return self.store_url_in(self.lang or "en")
+
+    def store_url_in(self, lang: str) -> str:
         shop = "stickershop" if self.kind == "sticker" else "emojishop"
         return f"{STORE}/{shop}/product/{self.pack_id}/{lang}"
 
@@ -123,22 +127,29 @@ class LinePack:
     def count(self) -> int:
         return len(self.sticker_ids)
 
-    def describe(self) -> str:
-        """A short human description, e.g. '40 animated stickers'."""
-        what = "emoji" if self.kind == "emoji" else "stickers"
-        style = "animated" if self.animated else "still"
+    def describe(self, lang: str = "en") -> str:
+        """A short human description, e.g. '40 animated stickers' / '40 個動態貼圖'."""
+        what = t(lang, "pack.emoji" if self.kind == "emoji" else "pack.stickers")
+        style = t(lang, "pack.animated" if self.animated else "pack.still")
         extra = ""
         if "POPUP" in self.resource_type or "EFFECT" in self.resource_type:
-            extra = " (pop-up effects)"
+            extra = t(lang, "pack.popup")
         elif "SOUND" in self.resource_type:
-            extra = " (sound is dropped - Telegram stickers are silent)"
+            extra = t(lang, "pack.sound")
         elif self.resource_type in ("NAME_TEXT", "PER_STICKER_TEXT", "CUSTOM"):
-            extra = " (custom-text pack - the text you type in LINE won't be included)"
-        return f"{self.count} {style} {what}{extra}"
+            extra = t(lang, "pack.custom_text")
+        return t(lang, "pack.describe", count=self.count, style=style, what=what, extra=extra)
 
 
-def _pick_title(titles: dict, prefer: str | None) -> str:
-    for lang in ((prefer,) if prefer else ()) + DEFAULT_LANGS:
+def title_languages(ui_lang: str, link_lang: str | None) -> tuple[str, ...]:
+    """Which of LINE's title languages to try, best first: the person's own language,
+    then the language in the link, then the usual suspects."""
+    first = ("zh-Hant", "zh-HK", "zh-TW") if ui_lang == "zh" else ("en",)
+    return first + ((link_lang,) if link_lang else ()) + DEFAULT_LANGS
+
+
+def _pick_title(titles: dict, order: tuple[str, ...]) -> str:
+    for lang in order:
         if lang and titles.get(lang):
             return titles[lang]
     for value in titles.values():
@@ -166,11 +177,11 @@ async def _get(client: httpx.AsyncClient, url: str) -> bytes | None:
             async for chunk in resp.aiter_bytes():
                 total += len(chunk)
                 if total > MAX_DOWNLOAD_BYTES:
-                    raise LineError("That LINE pack is unexpectedly large, so I stopped downloading it.")
+                    raise LineError("line.too_big")
                 chunks.append(chunk)
             return b"".join(chunks)
     except httpx.HTTPError as exc:
-        raise LineError(f"Couldn't reach LINE's servers ({exc.__class__.__name__}). Please try again later.") from exc
+        raise LineError("line.unreachable", error=exc.__class__.__name__) from exc
 
 
 def _open_zip(data: bytes | None) -> zipfile.ZipFile | None:
@@ -197,31 +208,34 @@ def is_animated_png(data: bytes) -> bool:
     return frames > 1
 
 
-async def fetch_info(link: LineLink, client: httpx.AsyncClient | None = None) -> LinePack:
-    """Look up a pack's title and contents without downloading the pictures."""
+async def fetch_info(link: LineLink, client: httpx.AsyncClient | None = None, lang: str = "en") -> LinePack:
+    """Look up a pack's title and contents without downloading the pictures.
+
+    lang: the person's language ("en" or "zh"); the pack's title is picked in that language if LINE has it.
+    """
     own = client is None
     client = client or _client()
     try:
         if link.kind == "sticker":
-            return await _sticker_info(client, link)
-        return await _emoji_info(client, link)
+            return await _sticker_info(client, link, lang)
+        return await _emoji_info(client, link, lang)
     finally:
         if own:
             await client.aclose()
 
 
-async def download(link: LineLink, client: httpx.AsyncClient | None = None) -> LinePack:
+async def download(link: LineLink, client: httpx.AsyncClient | None = None, lang: str = "en") -> LinePack:
     """Look up a pack and download all of its pictures (in the store's order)."""
     own = client is None
     client = client or _client()
     try:
-        pack = await fetch_info(link, client)
+        pack = await fetch_info(link, client, lang)
         if link.kind == "sticker":
             await _download_stickers(client, pack)
         else:
             await _download_emoji(client, pack)
         if not pack.items:
-            raise LineError("I found the pack but couldn't download any pictures from it.")
+            raise LineError("line.no_pictures")
         return pack
     finally:
         if own:
@@ -231,15 +245,15 @@ async def download(link: LineLink, client: httpx.AsyncClient | None = None) -> L
 # ---- stickers -------------------------------------------------------------
 
 
-async def _sticker_info(client: httpx.AsyncClient, link: LineLink) -> LinePack:
+async def _sticker_info(client: httpx.AsyncClient, link: LineLink, lang: str) -> LinePack:
     url = f"{CDN}/stickershop/v1/product/{link.pack_id}/iphone/productInfo.meta"
     raw = await _get(client, url)
     if raw is None:
-        raise LineError("LINE says that sticker pack doesn't exist (or it's no longer for sale).")
+        raise LineError("line.sticker_missing")
     try:
         meta = json.loads(raw)
     except ValueError as exc:
-        raise LineError("LINE sent back something I couldn't read for that pack.") from exc
+        raise LineError("line.sticker_unreadable") from exc
 
     resource_type = (meta.get("stickerResourceType") or "STATIC").upper()
     animated = bool(meta.get("hasAnimation")) or any(
@@ -247,10 +261,10 @@ async def _sticker_info(client: httpx.AsyncClient, link: LineLink) -> LinePack:
     )
     ids = [str(s["id"]) for s in meta.get("stickers", []) if "id" in s]
     if not ids:
-        raise LineError("That sticker pack appears to be empty.")
+        raise LineError("line.sticker_empty")
     return LinePack(
         link=link,
-        title=_pick_title(meta.get("title") or {}, link.lang),
+        title=_pick_title(meta.get("title") or {}, title_languages(lang, link.lang)),
         resource_type=resource_type,
         animated=animated,
         sticker_ids=ids,
@@ -295,10 +309,12 @@ _OG_TITLE = re.compile(r'<meta property="og:title" content="([^"]*)"')
 _TITLE_SUFFIX = re.compile(r"\s+[–-]\s+[^–|]*\|\s*LINE STORE\s*$")
 
 
-async def _emoji_title(client: httpx.AsyncClient, link: LineLink) -> str:
-    """Emoji packs don't list their name in the data file, so read it from the store web page."""
+async def _emoji_title(client: httpx.AsyncClient, link: LineLink, lang: str) -> str:
+    """Emoji packs don't list their name in the data file, so read it from the store web page
+    (in the person's language)."""
+    store_lang = "zh-Hant" if lang == "zh" else (link.lang or "en")
     try:
-        page = await _get(client, link.store_url)
+        page = await _get(client, link.store_url_in(store_lang))
     except LineError:
         page = None
     if page:
@@ -310,22 +326,22 @@ async def _emoji_title(client: httpx.AsyncClient, link: LineLink) -> str:
     return "LINE emoji"
 
 
-async def _emoji_info(client: httpx.AsyncClient, link: LineLink) -> LinePack:
+async def _emoji_info(client: httpx.AsyncClient, link: LineLink, lang: str) -> LinePack:
     url = f"{CDN}/sticonshop/v1/{link.pack_id}/sticon/iphone/meta.json"
     raw = await _get(client, url)
     if raw is None:
-        raise LineError("LINE says that emoji pack doesn't exist (or it's no longer for sale).")
+        raise LineError("line.emoji_missing")
     try:
         meta = json.loads(raw)
     except ValueError as exc:
-        raise LineError("LINE sent back something I couldn't read for that emoji pack.") from exc
+        raise LineError("line.emoji_unreadable") from exc
     resource_type = (meta.get("sticonResourceType") or "STATIC").upper()
     ids = [str(x) for x in meta.get("orders", [])]
     if not ids:
-        raise LineError("That emoji pack appears to be empty.")
+        raise LineError("line.emoji_empty")
     return LinePack(
         link=link,
-        title=await _emoji_title(client, link),
+        title=await _emoji_title(client, link, lang),
         resource_type=resource_type,
         animated="ANIMATION" in resource_type,
         sticker_ids=ids,

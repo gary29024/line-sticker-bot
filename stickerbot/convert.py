@@ -31,6 +31,8 @@ from dataclasses import dataclass
 
 from PIL import Image, ImageSequence
 
+from .i18n import UserError
+
 STICKER_SIDE = 512
 EMOJI_SIDE = 100
 MAX_STATIC_BYTES = 512 * 1024
@@ -50,8 +52,8 @@ FFMPEG = os.environ.get("FFMPEG_PATH", "ffmpeg")
 FFPROBE = os.environ.get("FFPROBE_PATH", "ffprobe")
 
 
-class ConvertError(Exception):
-    """A file couldn't be turned into a sticker. The message is safe to show users."""
+class ConvertError(UserError):
+    """A file couldn't be turned into a sticker. Shown to the person in their language (see i18n.py)."""
 
 
 @dataclass
@@ -106,7 +108,7 @@ def to_static(data: bytes, emoji: bool = False) -> Converted:
     """Any still picture (PNG, JPG, WEBP, the first frame of a GIF...) -> Telegram still sticker."""
     image = _open_image(data)
     if image is None:
-        raise ConvertError("I couldn't read that picture.")
+        raise ConvertError("conv.unreadable_picture")
     image.seek(0)
     frame = _fit_frame(image, emoji)
 
@@ -120,14 +122,14 @@ def to_static(data: bytes, emoji: bool = False) -> Converted:
         frame.save(buf, "WEBP", quality=quality, method=6)
         if buf.tell() <= MAX_STATIC_BYTES:
             return Converted(buf.getvalue(), "static", "webp")
-    raise ConvertError("That picture is too detailed to fit Telegram's 512 KB limit.")
+    raise ConvertError("conv.too_detailed_static")
 
 
 def _open_image(data: bytes) -> Image.Image | None:
     try:
         image = Image.open(io.BytesIO(data))
         if image.width * image.height > MAX_INPUT_PIXELS:
-            raise ConvertError("That picture is far too large.")
+            raise ConvertError("conv.too_large")
         return image
     except ConvertError:
         raise
@@ -216,7 +218,7 @@ async def _video_frames(data: bytes, emoji: bool) -> tuple[list[Image.Image], li
         )
         info = dict(line.split("=", 1) for line in out.decode(errors="replace").splitlines() if "=" in line)
         if code != 0 or not info.get("codec_name"):
-            raise ConvertError("I couldn't read that file as a picture or a video.")
+            raise ConvertError("conv.unreadable_file")
         decoder = {"vp9": ["-c:v", "libvpx-vp9"], "vp8": ["-c:v", "libvpx"]}.get(info["codec_name"], [])
         try:
             seconds = float(info.get("duration", "0"))
@@ -236,7 +238,7 @@ async def _video_frames(data: bytes, emoji: bool) -> tuple[list[Image.Image], li
         )
         names = sorted(n for n in os.listdir(tmp) if n.startswith("f") and n.endswith(".png"))
         if code != 0 or not names:
-            raise ConvertError("I couldn't read the frames of that video.")
+            raise ConvertError("conv.unreadable_frames")
         frames = []
         for name in names[: int(LONG_VIDEO_SECONDS * MAX_FPS)]:
             with Image.open(os.path.join(tmp, name)) as im:
@@ -298,7 +300,7 @@ async def _encode_webm(frames: list[Image.Image], order: list[int], fps: int, cr
         err = await stderr_task
         await proc.wait()
         if proc.returncode != 0 or not os.path.exists(out_path):
-            raise ConvertError(f"The video tool failed: {err.decode(errors='replace')[-200:]}")
+            raise ConvertError("conv.tool_failed", details=err.decode(errors="replace")[-200:])
         with open(out_path, "rb") as f:
             return f.read()
 
@@ -323,9 +325,7 @@ async def to_video(data: bytes, emoji: bool = False) -> Converted:
         if len(webm) <= MAX_VIDEO_BYTES:
             return Converted(webm, "video", "webm")
         smallest = len(webm) if smallest is None else min(smallest, len(webm))
-    raise ConvertError(
-        f"That animation is too detailed to fit Telegram's 256 KB limit (best try was {smallest // 1024} KB)."
-    )
+    raise ConvertError("conv.too_detailed_video", kb=(smallest or 0) // 1024)
 
 
 def looks_animated(data: bytes) -> bool:
@@ -339,7 +339,7 @@ def looks_animated(data: bytes) -> bool:
 async def convert(data: bytes, emoji: bool = False) -> Converted:
     """The one function the rest of the bot uses: give it a file, get a sticker back."""
     if data[:4] == b"\x1f\x8b\x08\x00" or data[:2] == b"\x1f\x8b":
-        raise ConvertError("Animated .tgs stickers can't be converted (they're vector drawings, not pictures).")
+        raise ConvertError("conv.tgs")
     if looks_animated(data):
         return await to_video(data, emoji)
     return await asyncio.to_thread(to_static, data, emoji)

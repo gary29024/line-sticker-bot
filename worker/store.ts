@@ -34,7 +34,14 @@ const SCHEMA = [
 		created_at REAL NOT NULL
 	)`,
 	`CREATE INDEX IF NOT EXISTS sets_owner ON sets(owner_id)`,
+	// Each person's chosen language (only stored if they picked one with /language).
+	`CREATE TABLE IF NOT EXISTS user_prefs (
+		user_id INTEGER PRIMARY KEY,
+		lang TEXT NOT NULL
+	)`,
 ];
+
+const LANGS = ["en", "zh"];
 
 // The table is created automatically the first time it's needed - no setup step.
 let schemaReady: Promise<unknown> | null = null;
@@ -108,6 +115,29 @@ async function run(db: D1Database, action: string, body: Record<string, unknown>
 		case "delete":
 			await db.prepare("DELETE FROM sets WHERE lower(name) = lower(?)").bind(text(body, "name", 64)).run();
 			return null;
+		case "get_lang": {
+			const row = await db
+				.prepare("SELECT lang FROM user_prefs WHERE user_id = ?")
+				.bind(int(body, "user_id"))
+				.first<{ lang: string }>();
+			return row?.lang ?? null;
+		}
+		case "set_lang": {
+			const userId = int(body, "user_id");
+			if (body.lang === null) {
+				await db.prepare("DELETE FROM user_prefs WHERE user_id = ?").bind(userId).run();
+				return null;
+			}
+			const lang = text(body, "lang", 8);
+			if (!LANGS.includes(lang)) throw new BadInput(`"lang" must be one of ${LANGS.join(", ")} or null`);
+			await db
+				.prepare(
+					"INSERT INTO user_prefs (user_id, lang) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET lang = excluded.lang",
+				)
+				.bind(userId, lang)
+				.run();
+			return null;
+		}
 		default:
 			throw new BadInput(`unknown action "${action}"`);
 	}

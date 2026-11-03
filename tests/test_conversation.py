@@ -21,27 +21,27 @@ from fake_telegram import FakeTelegram, UpdateMaker
 LINK = "https://store.line.me/stickershop/product/11537/en"
 
 
-def fake_pack(link: line_store.LineLink) -> line_store.LinePack:
+def fake_pack(link: line_store.LineLink, lang: str = "en") -> line_store.LinePack:
     items = [
         line_store.LineItem("1001", make_apng(), True),
         line_store.LineItem("1002", make_png(), False),
         line_store.LineItem("1003", make_apng((250, 300), frames=6), True),
     ]
     return line_store.LinePack(
-        link=link, title="Brown & Cony", resource_type="ANIMATION", animated=True,
+        link=link, title="熊大與兔兔" if lang == "zh" else "Brown & Cony", resource_type="ANIMATION", animated=True,
         sticker_ids=[i.key for i in items], items=items,
     )
 
 
 @pytest.fixture
 async def setup(tmp_path, monkeypatch):
-    async def fake_info(link, client=None):
-        pack = fake_pack(link)
+    async def fake_info(link, client=None, lang="en"):
+        pack = fake_pack(link, lang)
         pack.items = []
         return pack
 
-    async def fake_download(link, client=None):
-        return fake_pack(link)
+    async def fake_download(link, client=None, lang="en"):
+        return fake_pack(link, lang)
 
     monkeypatch.setattr(line_store, "fetch_info", fake_info)
     monkeypatch.setattr(line_store, "download", fake_download)

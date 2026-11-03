@@ -41,9 +41,12 @@ export interface Env {
 const STORE_HOST = "store.worker";
 const CONTAINER_PORT = 8080;
 const WAKE_TIMEOUT_MS = 90_000;
-const STARTING_UP_TEXT =
-	"⏳ The bot is starting up on Cloudflare – this can take a few minutes right after an update. " +
-	"Please send that again in a minute.";
+const STARTING_UP_TEXT = {
+	en:
+		"⏳ The bot is starting up on Cloudflare – this can take a few minutes right after an update. " +
+		"Please send that again in a minute.",
+	zh: "⏳ 機械人正在 Cloudflare 上啟動，更新後可能需要幾分鐘。請一分鐘後再傳送一次。",
+};
 
 export class StickerBot extends Container<Env> {
 	defaultPort = CONTAINER_PORT;
@@ -144,13 +147,34 @@ async function telegram(env: Env, method: string, payload: unknown): Promise<Tel
 	}
 }
 
+type TelegramUser = { id?: number; language_code?: string };
+type IncomingUpdate = {
+	message?: { chat?: { id?: number }; from?: TelegramUser };
+	callback_query?: { from?: TelegramUser; message?: { chat?: { id?: number } } };
+};
+
 /** The chat a Telegram update came from (a message, or a button tap on a message). */
-function chatIdOf(update: unknown): number | undefined {
-	const u = update as {
-		message?: { chat?: { id?: number } };
-		callback_query?: { message?: { chat?: { id?: number } } };
-	};
-	return u?.message?.chat?.id ?? u?.callback_query?.message?.chat?.id;
+function chatIdOf(update: IncomingUpdate): number | undefined {
+	return update?.message?.chat?.id ?? update?.callback_query?.message?.chat?.id;
+}
+
+/**
+ * The person's language, the same way the Python bot decides it: their /language choice
+ * (saved in D1), otherwise their Telegram app's language.
+ */
+async function languageOf(env: Env, update: IncomingUpdate): Promise<"en" | "zh"> {
+	const user = update?.message?.from ?? update?.callback_query?.from;
+	if (user?.id !== undefined) {
+		try {
+			const row = await env.DB.prepare("SELECT lang FROM user_prefs WHERE user_id = ?")
+				.bind(user.id)
+				.first<{ lang: string }>();
+			if (row?.lang === "en" || row?.lang === "zh") return row.lang;
+		} catch {
+			// table not created yet, or D1 busy – fall back to the app language
+		}
+	}
+	return user?.language_code?.toLowerCase().startsWith("zh") ? "zh" : "en";
 }
 
 /** Pass one Telegram update to the bot, waking it first. Gives back the bot's answer, or what went wrong. */
@@ -274,14 +298,16 @@ export default {
 			// The container couldn't be started. Tell the person (instead of silence), and answer
 			// Telegram "OK" so it doesn't keep re-sending the same message.
 			console.error("Bot container unavailable:", problem);
-			let chatId: number | undefined;
+			let update: IncomingUpdate = {};
 			try {
-				chatId = chatIdOf(JSON.parse(body));
+				update = JSON.parse(body) as IncomingUpdate;
 			} catch {
-				chatId = undefined;
+				// not JSON - nobody to tell
 			}
+			const chatId = chatIdOf(update);
 			if (chatId !== undefined) {
-				await telegram(env, "sendMessage", { chat_id: chatId, text: STARTING_UP_TEXT });
+				const text = STARTING_UP_TEXT[await languageOf(env, update)];
+				await telegram(env, "sendMessage", { chat_id: chatId, text });
 			}
 			return new Response("bot unavailable; user notified");
 		}

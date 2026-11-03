@@ -34,3 +34,13 @@ async def test_real_pack_downloads_and_first_item_converts(url, kind, animated):
 async def test_missing_pack_gives_friendly_error():
     with pytest.raises(line_store.LineError):
         await line_store.fetch_info(line_store.LineLink("sticker", "999999999"))
+
+
+async def test_real_pack_title_follows_language():
+    link = line_store.parse_line_link("https://line.me/S/sticker/11537")
+    en = await line_store.fetch_info(link, lang="en")
+    zh = await line_store.fetch_info(link, lang="zh")
+    assert en.title.startswith("Brown")
+    assert zh.title != en.title and any("\u4e00" <= ch <= "\u9fff" for ch in zh.title)
+    emoji = line_store.parse_line_link("https://store.line.me/emojishop/product/612762fee63ed0172f7c3660/en")
+    assert any("\u4e00" <= ch <= "\u9fff" for ch in (await line_store.fetch_info(emoji, lang="zh")).title)

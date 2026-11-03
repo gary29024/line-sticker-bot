@@ -116,6 +116,15 @@ async def storage_scenario(db):
     assert await db.get_by_name("ls1_by_bot") is None
     assert await db.list_for_owner(43) == []
 
+    # Language choices (/language)
+    assert await db.get_lang(big_id) is None
+    await db.set_lang(big_id, "zh")
+    assert await db.get_lang(big_id) == "zh"
+    await db.set_lang(big_id, "en")
+    assert await db.get_lang(big_id) == "en"
+    await db.set_lang(big_id, None)  # back to "follow my Telegram app"
+    assert await db.get_lang(big_id) is None
+
 
 async def test_sqlite_storage(tmp_path):
     await storage_scenario(SqliteStorage(str(tmp_path / "db.sqlite3")))
@@ -218,6 +227,8 @@ async def test_cloudflare_d1_storage(store_worker):
         assert bad.status_code == 400
         unknown = await db.client.post(store_worker + "/drop_table", json={})
         assert unknown.status_code == 400
+        bad_lang = await db.client.post(store_worker + "/set_lang", json={"user_id": 1, "lang": "fr"})
+        assert bad_lang.status_code == 400
     finally:
         await db.close()
 
@@ -228,13 +239,13 @@ async def test_import_through_webhook_with_d1_storage(store_worker, tmp_path, mo
     from stickerbot import line_store
     from test_conversation import LINK, fake_pack
 
-    async def fake_info(link, client=None):
-        pack = fake_pack(link)
+    async def fake_info(link, client=None, lang="en"):
+        pack = fake_pack(link, lang)
         pack.items = []
         return pack
 
-    async def fake_download(link, client=None):
-        return fake_pack(link)
+    async def fake_download(link, client=None, lang="en"):
+        return fake_pack(link, lang)
 
     monkeypatch.setattr(line_store, "fetch_info", fake_info)
     monkeypatch.setattr(line_store, "download", fake_download)

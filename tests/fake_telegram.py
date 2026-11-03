@@ -242,8 +242,10 @@ class FakeTelegram(BaseRequest):
 class UpdateMaker:
     """Builds the JSON Telegram would send when a user does something."""
 
-    def __init__(self, user_id: int = 42, first_name: str = "Gary"):
+    def __init__(self, user_id: int = 42, first_name: str = "Gary", language_code: str | None = None):
         self.user = {"id": user_id, "is_bot": False, "first_name": first_name}
+        if language_code:
+            self.user["language_code"] = language_code
         self.ids = itertools.count(1)
         self.counter = defaultdict(int)
 
