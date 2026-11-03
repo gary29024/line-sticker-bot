@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import bisect
 import io
+import logging
 import math
 import os
 import shutil
@@ -50,6 +51,12 @@ VIDEO_ATTEMPTS = [(30, 30), (35, 30), (40, 30), (45, 24), (50, 20), (55, 15), (6
 
 FFMPEG = os.environ.get("FFMPEG_PATH", "ffmpeg")
 FFPROBE = os.environ.get("FFPROBE_PATH", "ffprobe")
+# How many processor threads one ffmpeg may use. Kept small: the Cloudflare container has
+# half a processor, and "automatic" can guess far too many and run out of memory.
+FFMPEG_THREADS = max(1, int(os.environ.get("FFMPEG_THREADS") or "2"))
+ENCODE_ATTEMPTS = 3
+
+log = logging.getLogger(__name__)
 
 
 class ConvertError(UserError):
@@ -199,6 +206,7 @@ async def _run(*args: str, stdin: bytes | None = None) -> tuple[int, bytes, byte
         stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
     )
     out, err = await proc.communicate(stdin)
     return proc.returncode, out, err
@@ -273,8 +281,29 @@ def plan_timeline(durations: list[float], fps_cap: int) -> tuple[int, list[int]]
 
 
 async def _encode_webm(frames: list[Image.Image], order: list[int], fps: int, crf: int) -> bytes:
+    """Turn frames into a VP9 video. If ffmpeg gets stopped from outside (for example while
+    Cloudflare restarts the bot after an update), try again - that's not the picture's fault."""
     width, height = frames[0].size
     raw = [frame.tobytes() for frame in frames]
+    last_code = 0
+    for attempt in range(1, ENCODE_ATTEMPTS + 1):
+        code, err, video = await _run_encoder(raw, order, width, height, fps, crf)
+        if video is not None:
+            return video
+        message = err.decode(errors="replace").strip()
+        log.warning("ffmpeg failed (attempt %d, exit code %s): %s", attempt, code, message[-300:] or "(no message)")
+        if message and code > 0 and code != 255:
+            # ffmpeg explained what went wrong - trying again would give the same result.
+            raise ConvertError("conv.tool_failed", details=message[-200:])
+        last_code = code
+        await asyncio.sleep(attempt)
+    raise ConvertError("conv.tool_stopped", code=last_code)
+
+
+async def _run_encoder(
+    raw: list[bytes], order: list[int], width: int, height: int, fps: int, crf: int
+) -> tuple[int, bytes, bytes | None]:
+    """Run ffmpeg once. Returns (exit code, error text, video or None)."""
     with tempfile.TemporaryDirectory(prefix="stk-") as tmp:
         out_path = os.path.join(tmp, "out.webm")
         proc = await asyncio.create_subprocess_exec(
@@ -283,11 +312,13 @@ async def _encode_webm(frames: list[Image.Image], order: list[int], fps: int, cr
             "-framerate", str(fps), "-i", "pipe:0",
             "-an", "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
             "-crf", str(crf), "-b:v", "0",
-            "-deadline", "good", "-cpu-used", "4", "-row-mt", "1",
+            "-deadline", "good", "-cpu-used", "4", "-row-mt", "1", "-threads", str(FFMPEG_THREADS),
             "-f", "webm", out_path,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
+            # Its own process group: a stop signal meant for the bot isn't passed on to ffmpeg.
+            start_new_session=True,
         )
         stderr_task = asyncio.create_task(proc.stderr.read())
         try:
@@ -300,9 +331,9 @@ async def _encode_webm(frames: list[Image.Image], order: list[int], fps: int, cr
         err = await stderr_task
         await proc.wait()
         if proc.returncode != 0 or not os.path.exists(out_path):
-            raise ConvertError("conv.tool_failed", details=err.decode(errors="replace")[-200:])
+            return proc.returncode, err, None
         with open(out_path, "rb") as f:
-            return f.read()
+            return 0, err, f.read()
 
 
 async def to_video(data: bytes, emoji: bool = False) -> Converted:

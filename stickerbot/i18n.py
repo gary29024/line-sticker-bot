@@ -424,6 +424,10 @@ TEXTS: dict[str, dict[str, str]] = {
     },
     "conv.unreadable_frames": {"en": "I couldn't read the frames of that video.", "zh": "無法讀取這段影片的畫面。"},
     "conv.tool_failed": {"en": "The video tool failed: {details}", "zh": "影片轉換工具出錯：{details}"},
+    "conv.tool_stopped": {
+        "en": "The video tool kept being stopped (code {code}) – please try again in a minute.",
+        "zh": "影片轉換工具一直被中斷（代碼 {code}），請一分鐘後再試。",
+    },
     "conv.too_detailed_video": {
         "en": "That animation is too detailed to fit Telegram's 256 KB limit (best try was {kb} KB).",
         "zh": "這個動畫太精細，無法壓縮到 Telegram 的 256 KB 上限（最佳結果為 {kb} KB）。",

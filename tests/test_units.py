@@ -234,3 +234,42 @@ def test_long_gif_keeps_memory_small():
     frames[0].save(buf, "GIF", save_all=True, append_images=frames[1:] * 2, duration=40, loop=0)  # 16 s
     kept, durations = convert._image_frames(buf.getvalue(), emoji=False)
     assert sum(durations) <= convert.MAX_SECONDS * 1000 + 1  # cut, not sped up
+
+
+# ---- The video tool being stopped from outside ------------------------------------
+
+def _fake_ffmpeg(tmp_path, body: str):
+    """A stand-in for ffmpeg: runs `body` first, then (if it gets that far) the real ffmpeg."""
+    import shutil
+
+    script = tmp_path / "ffmpeg"
+    script.write_text(f'#!/bin/sh\n{body}\nexec "{shutil.which("ffmpeg")}" "$@"\n')
+    script.chmod(0o755)
+    return str(script)
+
+
+async def test_video_tool_stopped_once_is_retried(tmp_path, monkeypatch):
+    """Like a Cloudflare restart mid-import: ffmpeg is stopped the first time, the retry works."""
+    marker = tmp_path / "stopped-once"
+    monkeypatch.setattr(convert, "FFMPEG", _fake_ffmpeg(tmp_path, f'[ -e "{marker}" ] || {{ touch "{marker}"; kill -TERM $$; }}'))
+    result = await convert.convert(make_apng())
+    assert marker.exists()  # it really was stopped once
+    assert result.format == "video" and probe(result.data)["codec"] == "vp9"
+
+
+async def test_video_tool_always_stopped_gives_clear_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(convert, "FFMPEG", _fake_ffmpeg(tmp_path, "kill -KILL $$"))
+    with pytest.raises(convert.ConvertError) as caught:
+        await convert.convert(make_apng())
+    assert caught.value.key == "conv.tool_stopped"
+    assert "please try again" in caught.value.text("en")
+
+
+async def test_real_ffmpeg_error_is_not_retried(tmp_path, monkeypatch):
+    counter = tmp_path / "runs"
+    monkeypatch.setattr(convert, "FFMPEG", _fake_ffmpeg(
+        tmp_path, f'echo x >> "{counter}"; echo "Unknown encoder" >&2; exit 1'))
+    with pytest.raises(convert.ConvertError) as caught:
+        await convert.convert(make_apng())
+    assert caught.value.key == "conv.tool_failed" and "Unknown encoder" in caught.value.text("en")
+    assert counter.read_text().count("x") == 1  # gave up straight away
