@@ -64,12 +64,16 @@ async def send(app, data):
     await app.process_update(Update.de_json(data, app.bot))
 
 
-async def wait_for(condition, timeout=90):
+async def wait_for(condition, timeout=90, tg=None):
     loop = asyncio.get_running_loop()
     end = loop.time() + timeout
     while loop.time() < end:
         if condition():
             return
+        if tg is not None:
+            errors = [t for t in tg.texts() if t.startswith(("😕", "😵"))]
+            if errors:
+                raise AssertionError(f"the bot reported an error: {errors[-1]}")
         await asyncio.sleep(0.05)
     raise AssertionError("timed out waiting")
 
@@ -82,7 +86,7 @@ async def import_pack(app, tg, user):
     await send(app, user.text("My Brown"))
     assert "Which emoji" in tg.texts()[-1]
     await send(app, user.text("🐻 hi ❤️"))
-    await wait_for(lambda: any("Done!" in t for t in tg.texts()))
+    await wait_for(lambda: any("Done!" in t for t in tg.texts()), tg=tg)
 
 
 async def test_full_import_flow(setup):
@@ -103,6 +107,7 @@ async def test_full_import_flow(setup):
     assert created[0]["user_id"] == 42
     stickers = tg.sets["ls11537_by_test_sticker_bot"]["stickers"]
     assert [s["_format"] for s in stickers] == ["video", "static", "video"]  # order kept, formats right
+    assert all(s["_bytes"] > 1000 for s in stickers)  # real picture files arrived
     assert all(s["emoji"] == "🐻" for s in stickers)
     assert "https://t.me/addstickers/ls11537_by_test_sticker_bot" in tg.texts()[-1]
 

@@ -641,7 +641,7 @@ async def add_to_set(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 await msg.reply_text(f"😕 {exc}")
                 return
             sticker_input = InputSticker(
-                InputFile(converted.data, filename=converted.filename),
+                InputFile(converted.data, filename=converted.filename, attach=True),  # see jobs.py
                 emojis or [cfg(context).default_emoji],
                 converted.format,
             )

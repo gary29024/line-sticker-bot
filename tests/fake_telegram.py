@@ -12,6 +12,10 @@ from collections import defaultdict
 
 from telegram.request import BaseRequest, RequestData
 
+class BadSticker(Exception):
+    pass
+
+
 BOT_USER = {"id": 999, "is_bot": True, "first_name": "Sticker Bot", "username": "test_sticker_bot"}
 
 
@@ -92,12 +96,37 @@ class FakeTelegram(BaseRequest):
                 return p["reply_markup"]["inline_keyboard"]
         return []
 
-    def _store_sticker(self, set_name, item, files):
-        ref = item["sticker"]
-        if isinstance(ref, str) and ref.startswith("attach://"):
-            filename, data, *_ = files[ref[len("attach://"):]]
-        else:  # an existing file_id
-            filename, data = "reused", self.files.get(ref, b"")
+    def _check_sticker(self, item, files) -> bytes:
+        """Check one InputSticker the way real Telegram does; return the file's bytes."""
+        ref = item.get("sticker")
+        if not isinstance(ref, str):
+            raise BadSticker('Can\'t parse InputSticker: field "sticker" must be of type String')
+        if item.get("format") not in ("static", "animated", "video"):
+            raise BadSticker("STICKER_FORMAT_INVALID")
+        if not item.get("emoji_list"):
+            raise BadSticker("STICKER_EMOJI_INVALID")
+        if ref.startswith("attach://"):
+            part = files.get(ref[len("attach://"):])
+            if part is None:
+                raise BadSticker("wrong HTTP URL specified (attached file not found)")
+            data = part[1]
+        elif ref in self.files:
+            return self.files[ref]  # re-using a sticker already on "Telegram"
+        else:
+            raise BadSticker("wrong file identifier/HTTP URL specified")
+        if item["format"] == "video":
+            if not data.startswith(b"\x1a\x45\xdf\xa3"):
+                raise BadSticker("STICKER_VIDEO_NOWEBM")
+            if len(data) > 256 * 1024:
+                raise BadSticker("STICKER_VIDEO_BIG")
+        elif item["format"] == "static":
+            if not (data.startswith(b"\x89PNG") or data[8:12] == b"WEBP"):
+                raise BadSticker("STICKER_PNG_NOPNG")
+            if len(data) > 512 * 1024:
+                raise BadSticker("STICKER_FILE_BIG")
+        return data
+
+    def _store_sticker(self, set_name, item, data):
         file_id = f"F{next(self.ids)}"
         self.files[file_id] = data
         return {
@@ -144,12 +173,16 @@ class FakeTelegram(BaseRequest):
             return self._bad("sticker set name is already occupied")
         if not name.endswith("_by_" + BOT_USER["username"]):
             return self._bad("invalid sticker set name is specified")
+        try:
+            checked = [(item, self._check_sticker(item, files)) for item in params["stickers"]]
+        except BadSticker as exc:
+            return self._bad(str(exc))
         self.sets[name.lower()] = {
             "name": name, "title": params["title"], "owner": params["user_id"],
             "sticker_type": params.get("sticker_type", "regular"), "stickers": [],
         }
-        for item in params["stickers"]:
-            self.sets[name.lower()]["stickers"].append(self._store_sticker(name.lower(), item, files))
+        for item, data in checked:
+            self.sets[name.lower()]["stickers"].append(self._store_sticker(name.lower(), item, data))
         return self._ok(True)
 
     def m_addStickerToSet(self, params, files):
@@ -158,7 +191,11 @@ class FakeTelegram(BaseRequest):
             return self._bad("STICKERSET_INVALID")
         if params["user_id"] != s["owner"]:
             return self._bad("USER_ID_INVALID")
-        s["stickers"].append(self._store_sticker(params["name"].lower(), params["sticker"], files))
+        try:
+            data = self._check_sticker(params["sticker"], files)
+        except BadSticker as exc:
+            return self._bad(str(exc))
+        s["stickers"].append(self._store_sticker(params["name"].lower(), params["sticker"], data))
         return self._ok(True)
 
     def _find(self, file_id):

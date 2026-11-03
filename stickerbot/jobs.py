@@ -112,7 +112,9 @@ async def run_import(
                 result.failed.append(f"#{index}: {exc}")
                 continue
             sticker = InputSticker(
-                sticker=InputFile(sticker_file.data, filename=sticker_file.filename),
+                # attach=True: a file inside a sticker must be sent as an attachment, or Telegram
+                # receives an empty "sticker" field and refuses it.
+                sticker=InputFile(sticker_file.data, filename=sticker_file.filename, attach=True),
                 emoji_list=request.emojis,
                 format=sticker_file.format,
             )
