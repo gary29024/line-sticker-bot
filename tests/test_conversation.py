@@ -14,7 +14,7 @@ from telegram import Update
 from stickerbot import bot as botmod
 from stickerbot import line_store
 from stickerbot.config import Config
-from stickerbot.storage import Storage
+from stickerbot.storage import SqliteStorage as Storage
 from conftest import make_apng, make_png
 from fake_telegram import FakeTelegram, UpdateMaker
 

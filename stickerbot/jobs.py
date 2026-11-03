@@ -19,7 +19,7 @@ from telegram import Bot, InputFile, InputSticker, Message
 from telegram.error import BadRequest, TelegramError
 
 from . import convert, line_store, telegram_sets
-from .storage import Storage, set_link
+from .storage import RemoteStorage, SqliteStorage, set_link
 
 log = logging.getLogger(__name__)
 
@@ -80,7 +80,7 @@ class ImportResult:
 
 
 async def run_import(
-    bot: Bot, storage: Storage, request: ImportRequest, progress: Progress, convert_workers: int = 2
+    bot: Bot, storage: SqliteStorage | RemoteStorage, request: ImportRequest, progress: Progress, convert_workers: int = 2
 ) -> ImportResult:
     await progress.update("⬇️ Downloading from LINE…", force=True)
     pack = await line_store.download(request.link)
@@ -122,7 +122,7 @@ async def run_import(
                         bot, request.user_id, request.set_name, request.title, sticker, request.sticker_type
                     )
                     created = True
-                    storage.add_set(
+                    await storage.add_set(
                         request.set_name, request.title, request.user_id, request.sticker_type, request.link.store_url
                     )
                 else:

@@ -1,5 +1,6 @@
 """Start the bot:  python -m stickerbot"""
 
+import asyncio
 import logging
 
 from . import config
@@ -14,8 +15,15 @@ def main() -> None:
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)  # don't log every web request
     app = build_app(settings)
-    # "Polling" = the bot keeps asking Telegram "any new messages?". No public web address needed.
-    app.run_polling(allowed_updates=["message", "callback_query"])
+
+    if settings.mode == "webhook":
+        # Cloudflare: Telegram pushes messages to us through the Cloudflare Worker.
+        from .webhook import serve
+
+        asyncio.run(serve(app, settings.port, settings.webhook_secret))
+    else:
+        # Everywhere else: the bot keeps asking Telegram "any new messages?". No web address needed.
+        app.run_polling(allowed_updates=["message", "callback_query"])
 
 
 if __name__ == "__main__":

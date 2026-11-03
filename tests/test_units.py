@@ -183,16 +183,16 @@ def test_timeline_respects_limits():
 
 # ---- Storage ----------------------------------------------------------------
 
-def test_storage_roundtrip(tmp_path):
+async def test_storage_roundtrip(tmp_path):
     db = Storage(str(tmp_path / "x.sqlite3"))
-    rec = db.add_set("ls1_by_bot", "Title", 42, "regular", "https://line")
-    assert db.get_by_name("LS1_BY_BOT").id == rec.id
-    assert [r.name for r in db.list_for_owner(42)] == ["ls1_by_bot"]
-    db.rename("ls1_by_bot", "New")
-    assert db.get_by_id(rec.id).title == "New"
+    rec = await db.add_set("ls1_by_bot", "Title", 42, "regular", "https://line")
+    assert (await db.get_by_name("LS1_BY_BOT")).id == rec.id
+    assert [r.name for r in await db.list_for_owner(42)] == ["ls1_by_bot"]
+    await db.rename("ls1_by_bot", "New")
+    assert (await db.get_by_id(rec.id)).title == "New"
     assert rec.link == "https://t.me/addstickers/ls1_by_bot"
-    db.delete("ls1_by_bot")
-    assert db.list_for_owner(42) == []
+    await db.delete("ls1_by_bot")
+    assert await db.list_for_owner(42) == []
 
 
 # ---- Polite retries ---------------------------------------------------------

@@ -1,0 +1,14 @@
+// Only used by tests/test_cloudflare.py: the real Worker (worker/index.ts) with the
+// container switched off, to check its password checks and pages. Never deployed.
+{
+  "name": "sticker-bot-frontdesk-test",
+  "main": "../../worker/index.ts",
+  "compatibility_date": "2026-09-01",
+  "containers": [
+    { "class_name": "StickerBot", "image": "../../Dockerfile", "instance_type": "standard-1", "max_instances": 1 }
+  ],
+  "durable_objects": { "bindings": [{ "name": "STICKER_BOT", "class_name": "StickerBot" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["StickerBot"] }],
+  "d1_databases": [{ "binding": "DB", "database_name": "frontdesk-test", "database_id": "00000000-0000-0000-0000-000000000001" }],
+  "dev": { "enable_containers": false }
+}

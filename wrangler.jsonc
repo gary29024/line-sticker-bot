@@ -1,0 +1,40 @@
+// Cloudflare settings for the sticker bot.
+// Secrets (BOT_TOKEN, WEBHOOK_SECRET) are NOT in this file - add them in the Cloudflare dashboard:
+//   Workers & Pages → line-sticker-bot → Settings → Variables and Secrets → Add → type "Secret".
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "line-sticker-bot",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-09-01",
+  "observability": { "enabled": true },
+
+  // The Python bot runs in this container (built from the Dockerfile in this folder).
+  "containers": [
+    {
+      "class_name": "StickerBot",
+      "image": "./Dockerfile",
+      // standard-1 = 1/2 CPU, 4 GB memory. A 40-sticker animated pack takes about 2 minutes.
+      // Change to "standard-2" (1 CPU) for roughly twice as fast.
+      "instance_type": "standard-1",
+      "max_instances": 1
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "STICKER_BOT", "class_name": "StickerBot" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["StickerBot"] }],
+
+  // The list of who owns which sticker set. Created automatically on the first deploy.
+  "d1_databases": [{ "binding": "DB", "database_name": "line-sticker-bot" }],
+
+  // Optional settings - edit the values in quotes, then push/deploy again.
+  "vars": {
+    // Only these Telegram user IDs may use the bot, comma-separated (send /myid to the bot). Empty = everyone.
+    "ALLOWED_USER_IDS": "",
+    // User IDs that may edit ANY set the bot made.
+    "ADMIN_IDS": "",
+    "DEFAULT_EMOJI": "⭐",
+    "MAX_JOBS": "2",
+    "CONVERT_WORKERS": "2"
+  }
+}

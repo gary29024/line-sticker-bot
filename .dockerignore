@@ -6,3 +6,11 @@ data
 tests
 .env
 *.zip
+node_modules
+worker
+.wrangler
+.dev.vars
+package.json
+package-lock.json
+tsconfig.json
+wrangler.jsonc

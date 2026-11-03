@@ -41,7 +41,7 @@ from telegram.request import BaseRequest
 
 from . import convert, jobs, line_store, telegram_sets
 from .config import Config
-from .storage import SetRecord, Storage, set_link
+from .storage import RemoteStorage, SetRecord, SqliteStorage, set_link
 
 log = logging.getLogger(__name__)
 
@@ -85,7 +85,7 @@ def cfg(context: ContextTypes.DEFAULT_TYPE) -> Config:
     return context.bot_data["config"]
 
 
-def store(context: ContextTypes.DEFAULT_TYPE) -> Storage:
+def store(context: ContextTypes.DEFAULT_TYPE) -> SqliteStorage | RemoteStorage:
     return context.bot_data["storage"]
 
 
@@ -123,12 +123,12 @@ async def safe_send(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str,
         log.warning("Couldn't message %s: %s", chat_id, exc)
 
 
-def owned_set(context: ContextTypes.DEFAULT_TYPE, user_id: int, *, set_id=None, name=None) -> SetRecord | None:
+async def owned_set(context: ContextTypes.DEFAULT_TYPE, user_id: int, *, set_id=None, name=None) -> SetRecord | None:
     """The set, but only if this person may edit it (they made it, or they're an admin)."""
     if set_id is not None:
-        record = store(context).get_by_id(int(set_id))
+        record = await store(context).get_by_id(int(set_id))
     elif name:
-        record = store(context).get_by_name(name)
+        record = await store(context).get_by_name(name)
     else:
         return None
     if record and (record.owner_id == user_id or user_id in cfg(context).admin_ids):
@@ -152,6 +152,9 @@ def background(context: ContextTypes.DEFAULT_TYPE, chat_id: int, work, start_tex
     user_data = context.user_data
     user_data["busy"] = True
     slots: asyncio.Semaphore = context.bot_data["jobs"]
+    bot_data = context.bot_data
+    # Counted so the Cloudflare host knows not to put the bot to sleep mid-job.
+    bot_data["active_jobs"] = bot_data.get("active_jobs", 0) + 1
 
     async def runner():
         try:
@@ -169,6 +172,7 @@ def background(context: ContextTypes.DEFAULT_TYPE, chat_id: int, work, start_tex
             await safe_send(context, chat_id, f"😵 Sorry, that failed: {esc(str(exc))[:400]}")
         finally:
             user_data["busy"] = False
+            bot_data["active_jobs"] = max(0, bot_data.get("active_jobs", 1) - 1)
 
     return context.application.create_task(runner())
 
@@ -234,7 +238,7 @@ async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def cmd_manage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     reset(context)
-    sets = store(context).list_for_owner(update.effective_user.id)
+    sets = await store(context).list_for_owner(update.effective_user.id)
     if not sets:
         await say(update, context, "You don't have any sets yet. Send me a LINE sticker link to make one! ✨")
         return
@@ -257,7 +261,7 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     was_adding = context.user_data.get("waiting") == "add"
     reset(context)
-    record = owned_set(context, update.effective_user.id, name=context.user_data.get("set_name"))
+    record = await owned_set(context, update.effective_user.id, name=context.user_data.get("set_name"))
     if was_adding and record:
         await show_set_menu(update, context, record)
     else:
@@ -356,7 +360,7 @@ async def start_import(update: Update, context: ContextTypes.DEFAULT_TYPE, copy:
     if not copy:
         existing = await telegram_sets.get_set(context.bot, name)
         if existing is not None:
-            record = store(context).get_by_name(name)
+            record = await store(context).get_by_name(name)
             url = set_link(existing.name, existing.sticker_type)
             if record and record.owner_id == update.effective_user.id:
                 text = f"✅ You already made this one: <a href=\"{url}\">{esc(existing.title)}</a>"
@@ -436,7 +440,7 @@ async def launch_import(update: Update, context: ContextTypes.DEFAULT_TYPE, emoj
             request.set_name = set_name_for(request.link, bot.username, copy=True)
             result = await jobs.run_import(bot, storage, request, progress, workers)
 
-        record = storage.get_by_name(result.set_name)
+        record = await storage.get_by_name(result.set_name)
         noun = "emoji" if request.sticker_type == "custom_emoji" else "stickers"
         text = f"🎉 <b>Done!</b> {esc(result.title)} – {result.added} {noun} added.\n{result.link}"
         if result.failed:
@@ -500,7 +504,7 @@ async def got_telegram_set(update: Update, context: ContextTypes.DEFAULT_TYPE, n
         await say(update, context, "😕 I can't find that Telegram sticker set.")
         return
     rows = [[Btn("📦 Download as ZIP", callback_data="tg:zip")]]
-    record = owned_set(context, update.effective_user.id, name=name)
+    record = await owned_set(context, update.effective_user.id, name=name)
     if record:
         rows.append([Btn("🛠 Manage this set", callback_data=f"open:{record.id}")])
     await say(
@@ -536,7 +540,7 @@ async def start_telegram_zip(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def show_set_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, record: SetRecord) -> None:
     sticker_set = await telegram_sets.get_set(context.bot, record.name)
     if sticker_set is None:
-        store(context).delete(record.name)
+        await store(context).delete(record.name)
         await say(
             update,
             context,
@@ -560,28 +564,28 @@ async def show_set_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, reco
     )
 
 
-def current_set(update: Update, context: ContextTypes.DEFAULT_TYPE) -> SetRecord | None:
-    return owned_set(context, update.effective_user.id, name=context.user_data.get("set_name"))
+async def current_set(update: Update, context: ContextTypes.DEFAULT_TYPE) -> SetRecord | None:
+    return await owned_set(context, update.effective_user.id, name=context.user_data.get("set_name"))
 
 
 async def got_rename(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
-    record = current_set(update, context)
+    record = await current_set(update, context)
     title = " ".join(text.split())[: telegram_sets.NAME_MAX]
     if not record or not title:
         reset(context)
         await say(update, context, "Pick a set first: /manage")
         return
     await telegram_sets.call(context.bot.set_sticker_set_title, record.name, title)
-    store(context).rename(record.name, title)
+    await store(context).rename(record.name, title)
     reset(context)
     await say(update, context, f"✏️ Renamed to <b>{esc(title)}</b>.")
-    await show_set_menu(update, context, store(context).get_by_name(record.name))
+    await show_set_menu(update, context, await store(context).get_by_name(record.name))
 
 
 async def add_to_set(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Add whatever the person just sent (picture, GIF, video, sticker) to the set they're editing."""
     msg = update.effective_message
-    record = current_set(update, context)
+    record = await current_set(update, context)
     if record is None:
         reset(context)
         await say(update, context, "Pick a set first: /manage")
@@ -679,7 +683,7 @@ async def on_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if mode == "download_link":
         await start_telegram_zip(update, context)
         return
-    record = owned_set(context, update.effective_user.id, name=sticker.set_name)
+    record = await owned_set(context, update.effective_user.id, name=sticker.set_name)
     if record is None:
         await say(
             update,
@@ -705,16 +709,16 @@ async def on_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 
-def current_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> tuple[dict, SetRecord] | None:
+async def current_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> tuple[dict, SetRecord] | None:
     info = context.user_data.get("sticker")
     if not info:
         return None
-    record = owned_set(context, update.effective_user.id, name=info["set"])
+    record = await owned_set(context, update.effective_user.id, name=info["set"])
     return (info, record) if record else None
 
 
 async def got_move(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
-    found = current_sticker(update, context)
+    found = await current_sticker(update, context)
     if not found:
         reset(context)
         await say(update, context, "Send me the sticker you want to move first.")
@@ -735,7 +739,7 @@ async def got_move(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
 
 
 async def got_sticker_emoji(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
-    found = current_sticker(update, context)
+    found = await current_sticker(update, context)
     if not found:
         reset(context)
         await say(update, context, "Send me the sticker you want to change first.")
@@ -795,7 +799,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # Pick a set from "My sets"
     elif data.startswith("open:"):
-        record = owned_set(context, user_id, set_id=data.split(":", 1)[1])
+        record = await owned_set(context, user_id, set_id=data.split(":", 1)[1])
         if record:
             reset(context)
             await show_set_menu(update, context, record)
@@ -804,7 +808,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # Actions on the open set
     elif data.startswith("set:"):
-        record = current_set(update, context)
+        record = await current_set(update, context)
         if record is None:
             await say(update, context, "Pick a set first: /manage")
             return
@@ -836,7 +840,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
         elif action == "delete!":
             await telegram_sets.call(context.bot.delete_sticker_set, record.name)
-            store(context).delete(record.name)
+            await store(context).delete(record.name)
             reset(context)
             ud.pop("set_name", None)
             await say(update, context, "🗑 The set has been deleted.")
@@ -846,7 +850,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # Actions on one sticker
     elif data.startswith("stk:"):
-        found = current_sticker(update, context)
+        found = await current_sticker(update, context)
         if not found:
             await say(update, context, "Send me the sticker again, please.")
             return
@@ -898,6 +902,7 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def post_init(app: Application) -> None:
     config: Config = app.bot_data["config"]
     app.bot_data["jobs"] = asyncio.Semaphore(config.max_jobs)
+    app.bot_data.setdefault("active_jobs", 0)
     if not convert.ffmpeg_available():
         log.warning("ffmpeg/ffprobe not found - animated stickers will fail. Install ffmpeg.")
     try:
@@ -915,16 +920,31 @@ async def post_init(app: Application) -> None:
     log.info("Bot @%s is running.", app.bot.username)
 
 
-def build_app(config: Config, storage: Storage | None = None, request: BaseRequest | None = None) -> Application:
+def make_storage(config: Config) -> SqliteStorage | RemoteStorage:
+    """On Cloudflare (STORE_URL set) the list of sets lives in D1; everywhere else in a local file."""
+    if config.store_url:
+        return RemoteStorage(config.store_url)
+    return SqliteStorage(config.db_path)
+
+
+def build_app(
+    config: Config,
+    storage: SqliteStorage | RemoteStorage | None = None,
+    request: BaseRequest | None = None,
+) -> Application:
     builder: ApplicationBuilder = Application.builder().token(config.bot_token).post_init(post_init)
     builder = builder.concurrent_updates(16)
+    if config.telegram_api_url:  # only used by automated tests
+        base = config.telegram_api_url.rstrip("/")
+        builder = builder.base_url(f"{base}/bot").base_file_url(f"{base}/file/bot")
     if request is not None:  # used by the automated tests to fake Telegram
         builder = builder.request(request).get_updates_request(request)
     else:
         builder = builder.connect_timeout(15).read_timeout(30).write_timeout(60).media_write_timeout(120)
     app = builder.build()
     app.bot_data["config"] = config
-    app.bot_data["storage"] = storage or Storage(config.db_path)
+    app.bot_data["storage"] = storage or make_storage(config)
+    app.bot_data["active_jobs"] = 0
 
     app.add_handler(TypeHandler(Update, gatekeeper), group=-1)
     app.add_handler(CommandHandler(["start", "help"], cmd_start))
