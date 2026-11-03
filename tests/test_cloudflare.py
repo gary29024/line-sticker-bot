@@ -194,6 +194,20 @@ def test_worker_front_desk(front_desk):
     assert post("/telegram", json={"update_id": 1},
                 headers={"X-Telegram-Bot-Api-Secret-Token": SECRET + "x"}).status_code == 403
 
+    # With the right password but no container available (switched off in this test), the Worker
+    # must not fail silently: it answers Telegram "OK" (so Telegram stops re-sending) and tries to
+    # tell the person the bot is starting up.
+    update = {"update_id": 5, "message": {"message_id": 1, "date": 0, "chat": {"id": 42, "type": "private"},
+                                          "text": "/start"}}
+    resp = httpx.post(front_desk + "/telegram", json=update, trust_env=False, timeout=60,
+                      headers={"X-Telegram-Bot-Api-Secret-Token": SECRET})
+    assert resp.status_code == 200 and "user notified" in resp.text
+
+    # Status page needs the key, and reports on the container
+    assert get("/status").status_code == 403
+    status = httpx.get(front_desk + f"/status?key={SECRET}", trust_env=False, timeout=60)
+    assert status.status_code == 200 and "Container:" in status.text and "Wake the bot now" in status.text
+
 
 async def test_cloudflare_d1_storage(store_worker):
     db = RemoteStorage(store_worker)

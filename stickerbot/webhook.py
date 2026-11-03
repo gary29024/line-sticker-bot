@@ -65,15 +65,21 @@ def make_web_app(app: Application, secret: str) -> web.Application:
 
 
 async def serve(app: Application, port: int, secret: str) -> None:
-    """Start the bot and the web server, and run until told to stop (SIGTERM)."""
-    await app.initialize()
-    await post_init(app)
-    await app.start()
-
+    """Start the web server and the bot, and run until told to stop (SIGTERM)."""
+    # Open the door first, so Cloudflare sees the bot is up as quickly as possible.
+    # Messages that arrive while the bot is still connecting to Telegram simply wait in line.
     runner = web.AppRunner(make_web_app(app, secret), access_log=None)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", port).start()
     log.info("Webhook server listening on port %s", port)
+    try:
+        await app.initialize()
+        await post_init(app)
+        await app.start()
+    except Exception:
+        log.exception("The bot couldn't start (is BOT_TOKEN right?)")
+        await runner.cleanup()
+        raise
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

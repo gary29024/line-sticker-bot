@@ -136,8 +136,21 @@ In the dashboard go to **Storage & Databases → D1 → Create**, name it `line-
 <details>
 <summary>Watching what the bot does</summary>
 
-Your Worker → **Logs** shows the Worker's activity. **Workers & Pages → Containers** shows whether the bot's
-container is awake, plus its logs.
+Open `https://line-sticker-bot.<your-subdomain>.workers.dev/status?key=<WEBHOOK_SECRET>`. It shows whether the bot is
+awake, how many Telegram messages are waiting, and Telegram's last delivery error. Its **Wake the bot now** link
+starts the bot and shows Cloudflare's exact error if it can't.
+
+Your Worker → **Logs** shows the Worker's activity. **Workers & Pages → Containers** shows the bot's container and
+its logs.
+</details>
+
+<details>
+<summary>The bot doesn't answer, or says "The bot is starting up on Cloudflare"</summary>
+
+Right after a deploy, Cloudflare needs a few minutes to prepare the container (the log may say *"there is no
+container instance that can be provided to this Durable Object"*). Wait 2–5 minutes, open the status page above,
+tap **Wake the bot now**, and once it says ✅ send your message again. If it keeps failing, check
+**Workers & Pages → Containers** for the container's status and logs.
 </details>
 
 ### Option B: Railway (always on, about US$5–7/month)

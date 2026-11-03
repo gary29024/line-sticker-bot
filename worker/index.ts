@@ -40,6 +40,10 @@ export interface Env {
 
 const STORE_HOST = "store.worker";
 const CONTAINER_PORT = 8080;
+const WAKE_TIMEOUT_MS = 90_000;
+const STARTING_UP_TEXT =
+	"⏳ The bot is starting up on Cloudflare – this can take a few minutes right after an update. " +
+	"Please send that again in a minute.";
 
 export class StickerBot extends Container<Env> {
 	defaultPort = CONTAINER_PORT;
@@ -63,6 +67,22 @@ export class StickerBot extends Container<Env> {
 			CONVERT_WORKERS: env.CONVERT_WORKERS ?? "",
 			LOG_LEVEL: env.LOG_LEVEL ?? "INFO",
 		};
+	}
+
+	/**
+	 * Make sure the bot is running, starting it if it's asleep.
+	 *
+	 * The Containers library normally gives Cloudflare only 8 seconds to provide a
+	 * container, which isn't always enough right after a deploy (you'd see "there is no
+	 * container instance that can be provided to this Durable Object"). Allow much longer.
+	 */
+	async wake(): Promise<void> {
+		const state = await this.getState();
+		if (this.ctx.container?.running && state.status === "healthy") return;
+		await this.startAndWaitForPorts({
+			ports: CONTAINER_PORT,
+			cancellationOptions: { instanceGetTimeoutMS: WAKE_TIMEOUT_MS, portReadyTimeoutMS: WAKE_TIMEOUT_MS + 30_000 },
+		});
 	}
 
 	/** Called when the bot has been quiet for `sleepAfter`. Don't fall asleep mid-conversion. */
@@ -108,13 +128,92 @@ function escapeHtml(value: string): string {
 	return value.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 }
 
-async function telegram(env: Env, method: string, payload: unknown): Promise<{ ok: boolean; description?: string; result?: unknown }> {
-	const res = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
-		method: "POST",
-		headers: { "content-type": "application/json" },
-		body: JSON.stringify(payload ?? {}),
-	});
-	return res.json();
+type TelegramReply = { ok: boolean; description?: string; result?: unknown };
+
+async function telegram(env: Env, method: string, payload: unknown): Promise<TelegramReply> {
+	try {
+		const res = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(payload ?? {}),
+			signal: AbortSignal.timeout(10_000),
+		});
+		return (await res.json()) as TelegramReply;
+	} catch (err) {
+		return { ok: false, description: `Couldn't reach Telegram: ${String(err)}` };
+	}
+}
+
+/** The chat a Telegram update came from (a message, or a button tap on a message). */
+function chatIdOf(update: unknown): number | undefined {
+	const u = update as {
+		message?: { chat?: { id?: number } };
+		callback_query?: { message?: { chat?: { id?: number } } };
+	};
+	return u?.message?.chat?.id ?? u?.callback_query?.message?.chat?.id;
+}
+
+/** Pass one Telegram update to the bot, waking it first. Gives back the bot's answer, or what went wrong. */
+async function deliver(env: Env, body: string): Promise<{ response?: Response; problem?: string }> {
+	const bot = getContainer(env.STICKER_BOT, "main");
+	try {
+		await bot.wake();
+		const response = await bot.fetch(
+			new Request("http://container/telegram", {
+				method: "POST",
+				headers: { "content-type": "application/json", "X-Telegram-Bot-Api-Secret-Token": env.WEBHOOK_SECRET },
+				body,
+			}),
+		);
+		if (response.status < 500) return { response };
+		return { problem: `container answered ${response.status}: ${(await response.text()).slice(0, 300)}` };
+	} catch (err) {
+		return { problem: err instanceof Error ? err.message : String(err) };
+	}
+}
+
+/** A page for checking on the bot: is its container running? Optionally wake it and show any error. */
+async function status(url: URL, env: Env): Promise<Response> {
+	if (!sameSecret(url.searchParams.get("key"), env.WEBHOOK_SECRET)) {
+		return page("Wrong key", "<p>Add <code>?key=</code> followed by your WEBHOOK_SECRET to the address.</p>", 403);
+	}
+	const bot = getContainer(env.STICKER_BOT, "main");
+	let wakeResult = "";
+	if (url.searchParams.get("wake") === "1") {
+		const started = Date.now();
+		try {
+			await bot.wake();
+			wakeResult = `<p>✅ The bot is awake (took ${Math.round((Date.now() - started) / 1000)} s).</p>`;
+		} catch (err) {
+			wakeResult = `<p>❌ Couldn't start the bot after ${Math.round((Date.now() - started) / 1000)} s:</p>
+<pre style="white-space:pre-wrap">${escapeHtml(err instanceof Error ? err.message : String(err))}</pre>`;
+		}
+	}
+	let state = "unknown";
+	try {
+		state = (await bot.getState()).status;
+	} catch (err) {
+		state = `couldn't check (${escapeHtml(String(err))})`;
+	}
+	const info = await telegram(env, "getWebhookInfo", {});
+	const hook = info.result as { url?: string; pending_update_count?: number; last_error_message?: string } | undefined;
+	const meaning: Record<string, string> = {
+		healthy: "running and ready",
+		running: "starting up",
+		stopping: "going to sleep",
+		stopped: "asleep (it wakes up when a message arrives)",
+		stopped_with_code: "stopped after an error – see the Containers logs",
+	};
+	const wakeLink = `${url.origin}/status?key=${encodeURIComponent(url.searchParams.get("key") ?? "")}&wake=1`;
+	return page(
+		"Bot status",
+		`${wakeResult}
+<p><b>Container:</b> ${escapeHtml(state)} – ${escapeHtml(meaning[state] ?? "")}</p>
+<p><b>Telegram webhook:</b> ${escapeHtml(info.ok ? hook?.url || "not set – open /setup first" : `couldn't check (${info.description ?? "no answer"})`)}<br>
+<b>Messages waiting:</b> ${hook?.pending_update_count ?? "?"}<br>
+<b>Telegram's last delivery error:</b> ${escapeHtml(hook?.last_error_message || "none")}</p>
+<p><a href="${escapeHtml(wakeLink)}">Wake the bot now</a> (can take up to a couple of minutes right after an update).</p>`,
+	);
 }
 
 /** One-time setup: tell Telegram to send messages to this Worker. */
@@ -167,19 +266,28 @@ export default {
 			if (!sameSecret(request.headers.get("X-Telegram-Bot-Api-Secret-Token"), env.WEBHOOK_SECRET)) {
 				return new Response("Forbidden", { status: 403 });
 			}
-			// Hand the message to the bot (starting its container if it's asleep).
-			// If this fails, Telegram gets an error and simply re-sends the message later.
-			const bot = getContainer(env.STICKER_BOT, "main");
-			return bot.fetch(
-				new Request("http://container/telegram", {
-					method: "POST",
-					headers: {
-						"content-type": "application/json",
-						"X-Telegram-Bot-Api-Secret-Token": env.WEBHOOK_SECRET,
-					},
-					body: await request.text(),
-				}),
-			);
+			// Hand the message to the bot, waking its container if it's asleep.
+			const body = await request.text();
+			const { response, problem } = await deliver(env, body);
+			if (response) return response;
+
+			// The container couldn't be started. Tell the person (instead of silence), and answer
+			// Telegram "OK" so it doesn't keep re-sending the same message.
+			console.error("Bot container unavailable:", problem);
+			let chatId: number | undefined;
+			try {
+				chatId = chatIdOf(JSON.parse(body));
+			} catch {
+				chatId = undefined;
+			}
+			if (chatId !== undefined) {
+				await telegram(env, "sendMessage", { chat_id: chatId, text: STARTING_UP_TEXT });
+			}
+			return new Response("bot unavailable; user notified");
+		}
+
+		if (url.pathname === "/status") {
+			return status(url, env);
 		}
 
 		if (url.pathname === "/setup") {

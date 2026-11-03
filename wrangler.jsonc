@@ -16,7 +16,12 @@
       // standard-1 = 1/2 CPU, 4 GB memory. A 40-sticker animated pack takes about 2 minutes.
       // Change to "standard-2" (1 CPU) for roughly twice as fast.
       "instance_type": "standard-1",
-      "max_instances": 1
+      // The bot only ever runs ONE container at a time. The extra room lets Cloudflare
+      // start a fresh one while an old one is still being replaced after an update.
+      // You only pay for containers that are actually running.
+      "max_instances": 3,
+      // Update everything in one step after a deploy (there's only one bot to update).
+      "rollout_step_percentage": 100
     }
   ],
   "durable_objects": {
